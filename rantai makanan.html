@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Penyusun Rantai Makanan Misi Ekosistem</title>
+    <!-- Memuat Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Memuat Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, collection, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Atur level log Firebase ke Debug untuk melihat aktivitas di konsol
+        setLogLevel('Debug');
+
+        // --- GLOBAL VARIABLES (Provided by Canvas Environment) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // --- INISIALISASI FIREBASE ---
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        if (Object.keys(firebaseConfig).length > 0) {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+        } else {
+            console.error("Firebase Config tidak ditemukan.");
+        }
+
+        const CHAIN_DOC_PATH = `/artifacts/${appId}/public/data/rantai_makanan_groups`;
+        const DOC_ID = 'group_data_state'; // Satu dokumen untuk menyimpan semua 3 grup
+
+        // Komponen rantai makanan yang tersedia (berdasarkan aset.md)
+        const ECO_COMPONENTS = {
+            'PRODUSEN': { emoji: '🌾', label: 'Padi/Rumput' },
+            'KONSUMEN_I': { emoji: '🐁', label: 'Tikus Padi' },
+            'KONSUMEN_II': { emoji: '🐍', label: 'Ular Sawah' },
+            'KONSUMEN_III': { emoji: '🦅', label: 'Elang Jawa' },
+            'DEKOMPOSER': { emoji: '🍄', label: 'Jamur/Pengurai' }
+        };
+
+        const GROUPS = ['KELOMPOK_1', 'KELOMPOK_2', 'KELOMPOK_3'];
+        let currentGroup = GROUPS[0]; // Kelompok yang sedang diedit pengguna saat ini
+        let allGroupData = {}; // Data global dari Firestore
+
+        // --- AUTENTIKASI DAN INISIALISASI ---
+        if (auth) {
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    try {
+                        // Jika tidak ada token, sign in secara anonim
+                        if (!initialAuthToken) {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Gagal sign in anonim:", error);
+                    }
+                }
+                isAuthReady = true;
+                if (db) {
+                    startFirestoreListener();
+                }
+            });
+
+            if (initialAuthToken) {
+                signInWithCustomToken(auth, initialAuthToken).catch(error => {
+                    console.error("Gagal sign in dengan token:", error);
+                });
+            }
+        }
+
+        // --- FIREBASE FIRESTORE LISTENER (REAL-TIME UPDATE) ---
+        function startFirestoreListener() {
+            if (!userId) return; // Pastikan auth sudah siap
+
+            const docRef = doc(db, CHAIN_DOC_PATH, DOC_ID);
+
+            onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    allGroupData = docSnap.data();
+                } else {
+                    console.log("Dokumen data kelompok belum ada, membuat inisialisasi.");
+                    // Inisialisasi data jika dokumen tidak ada
+                    allGroupData = {
+                        'KELOMPOK_1': ['PRODUSEN'],
+                        'KELOMPOK_2': ['PRODUSEN'],
+                        'KELOMPOK_3': ['PRODUSEN'],
+                    };
+                }
+                renderAllChains();
+            }, (error) => {
+                console.error("Gagal mendapatkan snapshot:", error);
+            });
+        }
+
+        // --- FIREBASE WRITER (SAVE) ---
+        async function saveChain(groupName, chainArray) {
+            if (!isAuthReady || !userId) {
+                console.error("Autentikasi belum siap untuk menyimpan data.");
+                return;
+            }
+            try {
+                const docRef = doc(db, CHAIN_DOC_PATH, DOC_ID);
+                // Update hanya pada key grup tertentu
+                await setDoc(docRef, { [groupName]: chainArray }, { merge: true });
+                console.log(`Rantai Makanan ${groupName} berhasil disimpan.`);
+            } catch (error) {
+                console.error("Gagal menyimpan rantai makanan:", error);
+            }
+        }
+
+        // --- LOGIC APLIKASI ---
+
+        // Fungsi untuk merender semua rantai makanan
+        function renderAllChains() {
+            GROUPS.forEach(groupName => {
+                const chain = allGroupData[groupName] || ['PRODUSEN']; // Default to Produsen
+                renderChain(groupName, chain);
+            });
+            updateEditorUI();
+        }
+        
+        // Fungsi untuk merender rantai makanan spesifik di UI
+        function renderChain(groupName, chain) {
+            const container = document.getElementById(`chain-${groupName}`);
+            if (!container) return;
+
+            container.innerHTML = chain.map((key, index) => {
+                const component = ECO_COMPONENTS[key] || { emoji: '❓', label: 'TIDAK DIKENAL' };
+                const isEditable = groupName === currentGroup;
+                const isProdusen = key === 'PRODUSEN';
+                
+                let buttons = '';
+                if (isEditable) {
+                    // Tombol Hapus (kecuali untuk Produsen)
+                    if (!isProdusen) {
+                        buttons += `<button onclick="removeItem('${groupName}', ${index})" class="text-red-500 hover:text-red-700 ml-2 text-xl font-bold transition duration-150">×</button>`;
+                    }
+                    // Tombol Tambah (hanya di akhir)
+                    if (index === chain.length - 1 && chain.length < 5) {
+                        buttons += `<button onclick="showAddComponentModal('${groupName}')" class="text-green-500 hover:text-green-700 ml-4 text-3xl font-bold transition duration-150">+</button>`;
+                    }
+                }
+                
+                return `
+                    <div class="flex items-center">
+                        <!-- Komponen -->
+                        <div class="bg-gray-700 p-3 rounded-xl shadow-lg flex flex-col items-center justify-center min-w-[120px] transition duration-200 ${isEditable ? 'hover:bg-gray-600' : ''}">
+                            <span class="text-4xl">${component.emoji}</span>
+                            <span class="text-sm font-semibold mt-1 text-center">${component.label}</span>
+                            <span class="text-[10px] text-gray-400 mt-1">${key.replace('_', ' ')}</span>
+                        </div>
+                        
+                        <!-- Panah atau Tombol Aksi -->
+                        ${index < chain.length - 1 ? 
+                            '<span class="text-4xl mx-3 text-yellow-400 font-extrabold">&rarr;</span>' : buttons}
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Menampilkan modal tambah komponen
+        window.showAddComponentModal = (groupName) => {
+            if (groupName !== currentGroup) {
+                 alert('Anda hanya dapat mengedit rantai makanan untuk Kelompok yang sedang aktif.');
+                 return;
+            }
+
+            const modal = document.getElementById('add-component-modal');
+            const modalTitle = document.getElementById('modal-title');
+            const componentList = document.getElementById('component-list');
+            
+            modalTitle.textContent = `Tambahkan Komponen ke ${groupName}`;
+            componentList.innerHTML = '';
+            
+            // Filter komponen yang sudah ada (hanya Konsumen dan Dekomposer yang bisa ditambahkan)
+            const availableKeys = Object.keys(ECO_COMPONENTS).filter(key => key !== 'PRODUSEN');
+
+            availableKeys.forEach(key => {
+                const component = ECO_COMPONENTS[key];
+                const button = document.createElement('button');
+                button.className = 'w-full bg-gray-800 p-4 rounded-xl flex items-center hover:bg-green-800 transition duration-200';
+                button.innerHTML = `<span class="text-4xl mr-4">${component.emoji}</span> <div><span class="font-bold block">${component.label}</span> <span class="text-sm text-gray-400">${key.replace('_', ' ')}</span></div>`;
+                button.onclick = () => {
+                    addComponent(groupName, key);
+                    modal.classList.add('hidden');
+                };
+                componentList.appendChild(button);
+            });
+
+            modal.classList.remove('hidden');
+        };
+
+        // Menutup modal
+        window.closeAddComponentModal = () => {
+            document.getElementById('add-component-modal').classList.add('hidden');
+        };
+
+        // Menambahkan item ke rantai
+        function addComponent(groupName, key) {
+            const currentChain = allGroupData[groupName] || ['PRODUSEN'];
+            if (currentChain.length >= 5) {
+                // Batasan Maksimal
+                return;
+            }
+            const newChain = [...currentChain, key];
+            allGroupData[groupName] = newChain;
+            saveChain(groupName, newChain);
+        }
+
+        // Menghapus item dari rantai (hanya Konsumen dan Dekomposer)
+        window.removeItem = (groupName, index) => {
+            if (groupName !== currentGroup || index === 0) {
+                 return;
+            }
+            const currentChain = allGroupData[groupName] || ['PRODUSEN'];
+            const newChain = currentChain.filter((_, i) => i !== index);
+            allGroupData[groupName] = newChain;
+            saveChain(groupName, newChain);
+        };
+
+        // Mengubah kelompok yang sedang diedit
+        window.changeCurrentGroup = (groupName) => {
+            currentGroup = groupName;
+            updateEditorUI();
+            renderAllChains(); // Render ulang untuk mengaktifkan/menonaktifkan tombol
+        };
+        
+        // Memperbarui UI editor dan tombol grup
+        function updateEditorUI() {
+            const groupButtonsContainer = document.getElementById('group-buttons');
+            groupButtonsContainer.innerHTML = '';
+            GROUPS.forEach(groupName => {
+                const isActive = groupName === currentGroup;
+                const button = document.createElement('button');
+                button.textContent = groupName.replace('_', ' ');
+                button.className = `px-4 py-2 rounded-full font-bold transition duration-300 ${
+                    isActive 
+                        ? 'bg-yellow-500 text-gray-900 shadow-lg shadow-yellow-500/50' 
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                }`;
+                button.onclick = () => changeCurrentGroup(groupName);
+                groupButtonsContainer.appendChild(button);
+            });
+
+            // Perbarui indikator editor
+            const editorIndicator = document.getElementById('editor-indicator');
+            editorIndicator.textContent = `Editor Aktif: ${currentGroup.replace('_', ' ')}`;
+        }
+
+        // Inisialisasi awal UI
+        document.addEventListener('DOMContentLoaded', () => {
+            updateEditorUI();
+            renderAllChains();
+        });
+
+    </script>
+</head>
+<body class="bg-gray-900 p-4 sm:p-8 text-white min-h-screen font-sans">
+
+    <div class="max-w-6xl mx-auto">
+        
+        <!-- Header & Instruksi -->
+        <header class="text-center mb-10">
+            <h1 class="text-4xl font-extrabold text-green-400 mb-2">Penyusun Rantai Makanan 🌾🐍🦅</h1>
+            <p class="text-gray-400 max-w-2xl mx-auto">
+                Susun rantai makanan (Produsen → Konsumen → Dekomposer) dari aset yang diunduh. Aplikasi ini bersifat kolaboratif; perubahan Anda akan terlihat oleh kelompok lain secara *real-time*.
+            </p>
+        </header>
+
+        <!-- Pilihan Kelompok Editor -->
+        <div class="mb-8 p-4 bg-gray-800 rounded-xl shadow-inner border border-gray-700">
+            <p id="editor-indicator" class="text-xl font-bold text-yellow-400 mb-4 text-center"></p>
+            <div id="group-buttons" class="flex justify-center space-x-4">
+                <!-- Tombol Kelompok akan diisi oleh JS -->
+            </div>
+        </div>
+
+        <!-- Area Rantai Makanan untuk 3 Kelompok -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            <!-- GROUP 1 -->
+            <div class="bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-700">
+                <h2 class="text-2xl font-bold mb-4 text-blue-400">KELOMPOK 1</h2>
+                <div id="chain-KELOMPOK_1" class="flex flex-wrap items-center overflow-x-auto py-2">
+                    <!-- Rantai Makanan di sini -->
+                </div>
+            </div>
+
+            <!-- GROUP 2 -->
+            <div class="bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-700">
+                <h2 class="text-2xl font-bold mb-4 text-purple-400">KELOMPOK 2</h2>
+                <div id="chain-KELOMPOK_2" class="flex flex-wrap items-center overflow-x-auto py-2">
+                    <!-- Rantai Makanan di sini -->
+                </div>
+            </div>
+
+            <!-- GROUP 3 -->
+            <div class="bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-700">
+                <h2 class="text-2xl font-bold mb-4 text-red-400">KELOMPOK 3</h2>
+                <div id="chain-KELOMPOK_3" class="flex flex-wrap items-center overflow-x-auto py-2">
+                    <!-- Rantai Makanan di sini -->
+                </div>
+            </div>
+            
+        </div>
+        
+        <!-- Footer Info -->
+        <footer class="mt-12 text-center text-gray-500 text-sm">
+            <p>Rantai makanan disimpan di Server Pusat Data Konservasi (Firestore) secara real-time.</p>
+        </footer>
+    </div>
+
+    <!-- Modal Tambah Komponen -->
+    <div id="add-component-modal" class="fixed inset-0 bg-black bg-opacity-70 z-50 flex items-center justify-center hidden">
+        <div class="bg-gray-900 p-6 rounded-xl w-full max-w-md shadow-2xl border border-green-500">
+            <h3 id="modal-title" class="text-2xl font-bold mb-4 text-green-400 border-b pb-2 border-gray-700">Tambahkan Komponen</h3>
+            <div id="component-list" class="space-y-3 max-h-80 overflow-y-auto pr-2">
+                <!-- Daftar komponen di sini -->
+            </div>
+            <button onclick="closeAddComponentModal()" class="w-full mt-6 bg-red-600 text-white py-3 rounded-lg hover:bg-red-700 font-bold transition duration-200">
+                Tutup
+            </button>
+        </div>
+    </div>
+
+</body>
+</html>
